@@ -1,0 +1,59 @@
+# Copy to: <your fork of saleor-dashboard>/.github/workflows/ci.yaml
+# Same secrets/variables as the saleor repo (AWS_ROLE_ARN, GITOPS_TOKEN, AWS_REGION).
+# API_URL build time pe nahi, runtime pe Deployment env se aata hai, isliye ek hi image har env mein chalegi.
+name: saleor-dashboard CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ECR_REPO: saleor-dashboard
+  GITOPS_REPO: ${{ github.repository_owner }}/saleor-gitops
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update image tag in manifests
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+        run: |
+          cd gitops
+          sed -i -E "s#image: .*/${ECR_REPO}:.*#image: ${IMAGE}#" k8s/*.yaml
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "saleor-dashboard: deploy ${GITHUB_SHA::7}" || echo "No changes"
+          git push
